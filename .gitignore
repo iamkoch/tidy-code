@@ -1,0 +1,4 @@
+/tidy
+/tidy-code
+*.tmp
+.DS_Store
