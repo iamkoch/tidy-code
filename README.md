@@ -25,6 +25,72 @@ tidy-code ~/projects   # scans the given path
 
 All items start selected. Toggle off the ones you want to keep, then press `d`.
 
+## Screenshots
+
+The TUI uses ANSI colour, which markdown does not render. The blocks below show layout and structure; in a real terminal the cursor row is highlighted, selected items are green, partially selected groups are amber, and the last-modified column is coloured red, amber, or green by age.
+
+Initial scan:
+
+```
+  ⠋ scanning /Users/ant/projects for build artefacts...
+```
+
+List view (cursor on the Node.js header, one item under Node.js deselected, Rust group partially selected):
+
+```
+  tidy   /Users/ant/projects
+  selected: 18.3 GiB across 142 items
+  cached 2h ago · press [r] to rescan
+
+▸ [x] ▾ Node.js (87)              12.4 GiB / 14.1 GiB
+      [x]   412.3 MiB   2w ago      /Users/ant/projects/web-app/node_modules
+      [x]   388.1 MiB   3d ago      /Users/ant/projects/api/node_modules
+      [ ]    92.4 MiB   5h ago      /Users/ant/projects/feature-x/node_modules
+      [x]    45.8 MiB   2mo ago     /Users/ant/projects/old-prototype/node_modules
+  [~] ▾ Rust (4)                     3.1 GiB / 4.8 GiB
+      [x]     2.8 GiB   1mo ago     /Users/ant/projects/compiler-fork/target
+      [ ]     1.7 GiB   2d ago      /Users/ant/projects/active-rs-app/target
+  [x] ▸ .NET (12)                    1.6 GiB / 1.6 GiB
+  [x] ▸ Python (39)                847.2 MiB / 847.2 MiB
+
+  [↑↓/jk] move  [PgUp/PgDn] page  [g/G] top/bot  [Tab/[ ]] next/prev group
+  [c/o or ←/→] fold  [C/O] fold all  [space] toggle  [a/n] all/none  [d] delete  [r] rescan  [q] quit
+```
+
+Confirmation:
+
+```
+  tidy
+
+  Delete 142 items totalling 18.3 GiB?
+  This cannot be undone.
+
+  [y] yes   [n] no
+```
+
+After delete, back to the list with a status line:
+
+```
+  tidy   /Users/ant/projects
+  selected: 0 B across 0 items
+  freed 18.3 GiB across 142 items
+
+  nothing to clean up.
+
+  [q] quit
+```
+
+Glyph key:
+
+| Glyph | Meaning |
+| --- | --- |
+| `▸` | cursor / collapsed group |
+| `▾` | expanded group |
+| `[x]` | selected (green) |
+| `[~]` | partially selected group (amber) |
+| `[ ]` | deselected |
+| `-` | mtime unknown |
+
 ## Keys
 
 | Action | Key |

@@ -154,7 +154,7 @@ func scanCmd(root string) tea.Cmd {
 // deleteCmd deletes ONLY items where Selected == true. Anything passed in
 // without Selected set is ignored as a defence-in-depth check; callers should
 // already have filtered. Only successfully removed paths end up in
-// deletedPaths — failures stay on disk and remain in the model.
+// deletedPaths. Failures stay on disk and remain in the model.
 func deleteCmd(items []*Item) tea.Cmd {
 	return func() tea.Msg {
 		result := deleteResultMsg{deletedPaths: make(map[string]struct{})}
@@ -495,7 +495,7 @@ var (
 
 func humanAge(t time.Time) string {
 	if t.IsZero() {
-		return "—"
+		return "-"
 	}
 	d := time.Since(t)
 	if d < 0 {
@@ -520,7 +520,7 @@ func humanAge(t time.Time) string {
 }
 
 // ageStyle returns the colour for a last-modified timestamp:
-//   - red:   modified within the past week (recently active — risky to delete)
+//   - red:   modified within the past week (recently active, risky to delete)
 //   - amber: 1–4 weeks old
 //   - green: older than 4 weeks (stale, safe to delete)
 func ageStyle(t time.Time) lipgloss.Style {
@@ -586,7 +586,7 @@ func (m model) viewList() string {
 	b.WriteString("  " + totals + "\n")
 	if !m.cachedAt.IsZero() {
 		b.WriteString("  " + dimStyle.Render(
-			fmt.Sprintf("cached %s — press [r] to rescan", humanAge(m.cachedAt)),
+			fmt.Sprintf("cached %s · press [r] to rescan", humanAge(m.cachedAt)),
 		) + "\n")
 	}
 	if m.statusMessage != "" {
