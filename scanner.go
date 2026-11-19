@@ -123,11 +123,7 @@ func isVCS(name string) bool {
 // concurrently, sharing a single semaphore that caps in-flight ReadDir
 // syscalls so we don't melt the disk.
 func Scan(root string) ([]Item, error) {
-	concurrency := runtime.NumCPU() * 4
-	if concurrency < 8 {
-		concurrency = 8
-	}
-	sem := make(chan struct{}, concurrency)
+	sem := make(chan struct{}, scanConcurrency())
 
 	var resultMu sync.Mutex
 	var results []Item
@@ -186,6 +182,54 @@ func Scan(root string) ([]Item, error) {
 	sizeWG.Wait()
 
 	return results, nil
+}
+
+func scanConcurrency() int {
+	c := runtime.NumCPU() * 4
+	if c < 8 {
+		c = 8
+	}
+	return c
+}
+
+// measurement is the result of re-measuring one artefact directory found by
+// an earlier Scan.
+type measurement struct {
+	Path         string
+	Gone         bool  // the path no longer exists, or is no longer a directory
+	Err          error // the path could not be read; Size and LastModified are unset
+	Size         int64
+	LastModified time.Time
+}
+
+// Remeasure re-sizes the given artefact directories without walking the rest
+// of the tree. Results are in the same order as paths.
+func Remeasure(paths []string) []measurement {
+	sem := make(chan struct{}, scanConcurrency())
+	out := make([]measurement, len(paths))
+	var wg sync.WaitGroup
+	for i, p := range paths {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			out[i].Path = p
+			info, err := os.Lstat(p)
+			switch {
+			case os.IsNotExist(err):
+				out[i].Gone = true
+				return
+			case err != nil:
+				out[i].Err = err
+				return
+			case !info.IsDir():
+				out[i].Gone = true
+				return
+			}
+			out[i].Size, out[i].LastModified = dirSizeAndMtime(p, sem)
+		}()
+	}
+	wg.Wait()
+	return out
 }
 
 // dirSizeAndMtime sums all regular file sizes under root and returns the

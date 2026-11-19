@@ -88,12 +88,19 @@ type model struct {
 	scanErr       error
 	statusMessage string
 	failedPaths   []string
-	cachedAt      time.Time // zero when results are fresh
+	cachedAt      time.Time           // zero when results are fresh
+	scannedAt     time.Time           // when the last full scan ran
+	pending       map[string]struct{} // paths with a rescan in flight
 }
 
 type scanDoneMsg struct {
 	items []Item
 	err   error
+}
+
+type rescanDoneMsg struct {
+	label   string
+	results []measurement
 }
 
 type deleteResultMsg struct {
@@ -118,6 +125,7 @@ func newModel(root string) model {
 		m.rebuildRows()
 		m.state = stateList
 		m.cachedAt = cf.ScannedAt
+		m.scannedAt = cf.ScannedAt
 		return m
 	}
 
@@ -151,17 +159,35 @@ func scanCmd(root string) tea.Cmd {
 	}
 }
 
+// rescanCmd re-measures the given items' paths in the background. It copies
+// the paths before returning so the goroutine never reads model state.
+func rescanCmd(label string, items []*Item) tea.Cmd {
+	paths := make([]string, len(items))
+	for i, it := range items {
+		paths[i] = it.Path
+	}
+	return func() tea.Msg {
+		return rescanDoneMsg{label: label, results: Remeasure(paths)}
+	}
+}
+
 // deleteCmd deletes ONLY items where Selected == true. Anything passed in
 // without Selected set is ignored as a defence-in-depth check; callers should
 // already have filtered. Only successfully removed paths end up in
 // deletedPaths. Failures stay on disk and remain in the model.
+//
+// It copies path, size, and selection before returning, because a rescan
+// result can update an item's size while the delete runs.
 func deleteCmd(items []*Item) tea.Cmd {
+	snap := make([]Item, 0, len(items))
+	for _, it := range items {
+		if it.Selected {
+			snap = append(snap, *it)
+		}
+	}
 	return func() tea.Msg {
 		result := deleteResultMsg{deletedPaths: make(map[string]struct{})}
-		for _, it := range items {
-			if !it.Selected {
-				continue
-			}
+		for _, it := range snap {
 			if err := os.RemoveAll(it.Path); err != nil {
 				result.failed = append(result.failed, it.Path+": "+err.Error())
 				continue
@@ -186,18 +212,136 @@ func buildGroups(items []Item) []*group {
 	}
 	out := make([]*group, 0, len(byLang))
 	for _, g := range byLang {
+		out = append(out, g)
+	}
+	sortGroups(out)
+	return out
+}
+
+// sortGroups orders items within each group by size, then groups by total
+// size, both largest first.
+func sortGroups(gs []*group) {
+	for _, g := range gs {
 		sort.Slice(g.items, func(i, j int) bool {
 			if g.items[i].Size != g.items[j].Size {
 				return g.items[i].Size > g.items[j].Size
 			}
 			return g.items[i].Path < g.items[j].Path
 		})
-		out = append(out, g)
 	}
-	sort.Slice(out, func(i, j int) bool {
-		return out[i].totalSize() > out[j].totalSize()
+	sort.Slice(gs, func(i, j int) bool {
+		return gs[i].totalSize() > gs[j].totalSize()
 	})
-	return out
+}
+
+// removePaths drops the given paths from the model, and any group left empty.
+func (m *model) removePaths(paths map[string]struct{}) {
+	for _, g := range m.groups {
+		kept := g.items[:0]
+		for _, it := range g.items {
+			if _, ok := paths[it.Path]; ok {
+				continue
+			}
+			kept = append(kept, it)
+		}
+		g.items = kept
+	}
+	gs := m.groups[:0]
+	for _, g := range m.groups {
+		if len(g.items) > 0 {
+			gs = append(gs, g)
+		}
+	}
+	m.groups = gs
+}
+
+// startRescan marks the items as pending and returns the command that
+// re-measures them. Items already being rescanned are skipped.
+func (m *model) startRescan(label string, items []*Item) tea.Cmd {
+	if m.pending == nil {
+		m.pending = map[string]struct{}{}
+	}
+	var todo []*Item
+	for _, it := range items {
+		if _, busy := m.pending[it.Path]; busy {
+			continue
+		}
+		m.pending[it.Path] = struct{}{}
+		todo = append(todo, it)
+	}
+	if len(todo) == 0 {
+		return nil
+	}
+	m.statusMessage = ""
+	return tea.Batch(m.spinner.Tick, rescanCmd(label, todo))
+}
+
+// applyRescan writes re-measured sizes back to the model, drops items whose
+// directory no longer exists, re-sorts, and keeps the cursor on the same row.
+func (m *model) applyRescan(msg rescanDoneMsg) {
+	byPath := map[string]*Item{}
+	for _, g := range m.groups {
+		for _, it := range g.items {
+			byPath[it.Path] = it
+		}
+	}
+
+	var before, after int64
+	var unreadable int
+	gone := map[string]struct{}{}
+	for _, r := range msg.results {
+		delete(m.pending, r.Path)
+		it, ok := byPath[r.Path]
+		if !ok {
+			continue // deleted or replaced by a full rescan in the meantime
+		}
+		if r.Err != nil {
+			unreadable++
+			continue
+		}
+		before += it.Size
+		if r.Gone {
+			gone[r.Path] = struct{}{}
+			continue
+		}
+		after += r.Size
+		it.Size = r.Size
+		it.LastModified = r.LastModified
+	}
+
+	var cursorItem *Item
+	var cursorGroup *group
+	if len(m.rows) > 0 {
+		cursorItem = m.rows[m.cursor].item
+		cursorGroup = m.rows[m.cursor].group
+	}
+
+	m.removePaths(gone)
+	sortGroups(m.groups)
+	m.rebuildRows()
+	m.cursorToRow(cursorItem, cursorGroup)
+
+	m.statusMessage = fmt.Sprintf("rescanned %s: %s -> %s (%s)",
+		msg.label, humanBytes(before), humanBytes(after), humanDelta(after-before))
+	if len(gone) > 0 {
+		m.statusMessage += fmt.Sprintf("  (%d gone)", len(gone))
+	}
+	if unreadable > 0 {
+		m.statusMessage += fmt.Sprintf("  (%d unreadable)", unreadable)
+	}
+
+	_ = saveCache(m.root, m.flatItems(), m.scannedAt)
+}
+
+func humanDelta(d int64) string {
+	switch {
+	case d < 0:
+		return "-" + humanBytes(-d)
+	case d > 0:
+		return "+" + humanBytes(d)
+	default:
+		return "no change"
+	}
 }
 
 func (m *model) rebuildRows() {
@@ -234,6 +378,23 @@ func (m *model) cursorTo(g *group) {
 			m.cursor = i
 			return
 		}
+	}
+}
+
+// cursorToRow moves the cursor to the item's row if it is still visible,
+// otherwise to the group's header if the group still exists. If neither
+// exists, the cursor stays where rebuildRows clamped it.
+func (m *model) cursorToRow(it *Item, g *group) {
+	if it != nil {
+		for i, r := range m.rows {
+			if r.item == it {
+				m.cursor = i
+				return
+			}
+		}
+	}
+	if g != nil {
+		m.cursorTo(g)
 	}
 }
 
@@ -292,7 +453,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case spinner.TickMsg:
-		if m.state == stateScanning || m.state == stateDeleting {
+		if m.state == stateScanning || m.state == stateDeleting || len(m.pending) > 0 {
 			var cmd tea.Cmd
 			m.spinner, cmd = m.spinner.Update(msg)
 			return m, cmd
@@ -307,30 +468,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.rebuildRows()
 		m.state = stateList
 		m.cachedAt = time.Time{} // fresh
-		_ = saveCache(m.root, msg.items, time.Now())
+		m.scannedAt = time.Now()
+		_ = saveCache(m.root, msg.items, m.scannedAt)
+		return m, nil
+
+	case rescanDoneMsg:
+		m.applyRescan(msg)
 		return m, nil
 
 	case deleteResultMsg:
 		// Drop only paths that were ACTUALLY removed. Failed deletes stay on
 		// disk and stay visible in the model (still selected) so the user can
 		// retry or investigate.
-		for _, g := range m.groups {
-			kept := g.items[:0]
-			for _, it := range g.items {
-				if _, ok := msg.deletedPaths[it.Path]; ok {
-					continue
-				}
-				kept = append(kept, it)
-			}
-			g.items = kept
-		}
-		gs := m.groups[:0]
-		for _, g := range m.groups {
-			if len(g.items) > 0 {
-				gs = append(gs, g)
-			}
-		}
-		m.groups = gs
+		m.removePaths(msg.deletedPaths)
 		m.rebuildRows()
 		m.failedPaths = msg.failed
 		m.statusMessage = fmt.Sprintf("freed %s across %d items",
@@ -454,12 +604,22 @@ func (m model) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.state = stateConfirm
 		}
 	case "r":
+		if len(m.rows) == 0 {
+			return m, nil
+		}
+		r := m.rows[m.cursor]
+		if r.kind == rowGroup {
+			return m, m.startRescan(r.group.name, r.group.items)
+		}
+		return m, m.startRescan(r.item.Path, []*Item{r.item})
+	case "R":
 		m.state = stateScanning
 		m.groups = nil
 		m.rows = nil
 		m.cursor = 0
 		m.statusMessage = ""
 		m.cachedAt = time.Time{}
+		m.pending = nil
 		return m, tea.Batch(m.spinner.Tick, scanCmd(m.root))
 	}
 	return m, nil
@@ -586,17 +746,19 @@ func (m model) viewList() string {
 	b.WriteString("  " + totals + "\n")
 	if !m.cachedAt.IsZero() {
 		b.WriteString("  " + dimStyle.Render(
-			fmt.Sprintf("cached %s · press [r] to rescan", humanAge(m.cachedAt)),
+			fmt.Sprintf("cached %s · press [R] to rescan all", humanAge(m.cachedAt)),
 		) + "\n")
 	}
-	if m.statusMessage != "" {
+	if n := len(m.pending); n > 0 {
+		b.WriteString(fmt.Sprintf("  %s rescanning %d items...\n", m.spinner.View(), n))
+	} else if m.statusMessage != "" {
 		b.WriteString("  " + selectedStyle.Render(m.statusMessage) + "\n")
 	}
 	b.WriteString("\n")
 
 	if len(m.rows) == 0 {
 		b.WriteString("  " + dimStyle.Render("nothing to clean up.") + "\n\n")
-		b.WriteString("  " + helpStyle.Render("[q] quit") + "\n")
+		b.WriteString("  " + helpStyle.Render("[R] rescan all  [q] quit") + "\n")
 		return b.String()
 	}
 
@@ -613,7 +775,7 @@ func (m model) viewList() string {
 
 	for i := start; i < end; i++ {
 		r := m.rows[i]
-		line := renderRow(r)
+		line := m.renderRow(r)
 		if i == m.cursor {
 			line = cursorStyle.Render("▸ " + line)
 		} else {
@@ -627,13 +789,13 @@ func (m model) viewList() string {
 	}
 
 	help1 := "[↑↓/jk] move  [PgUp/PgDn] page  [g/G] top/bot  [Tab/[ ]] next/prev group"
-	help2 := "[c/o or ←/→] fold  [C/O] fold all  [space] toggle  [a/n] all/none  [d] delete  [r] rescan  [q] quit"
+	help2 := "[c/o or ←/→] fold  [C/O] fold all  [space] toggle  [a/n] all/none  [d] delete  [r/R] rescan row/all  [q] quit"
 	b.WriteString("\n  " + helpStyle.Render(help1) + "\n")
 	b.WriteString("  " + helpStyle.Render(help2) + "\n")
 	return b.String()
 }
 
-func renderRow(r row) string {
+func (m model) renderRow(r row) string {
 	switch r.kind {
 	case rowGroup:
 		mark := checkbox(r.group.allSelected(), r.group.anySelected())
@@ -650,12 +812,16 @@ func renderRow(r row) string {
 		)
 	case rowItem:
 		mark := checkbox(r.item.Selected, false)
-		size := humanBytes(r.item.Size)
+		size := padRight(humanBytes(r.item.Size), 10)
 		age := padRight(humanAge(r.item.LastModified), 10)
 		ageColoured := ageStyle(r.item.LastModified).Render(age)
+		if _, busy := m.pending[r.item.Path]; busy {
+			size = dimStyle.Render(padRight("...", 10))
+			ageColoured = dimStyle.Render(age)
+		}
 		return fmt.Sprintf("    %s %s  %s  %s",
 			mark,
-			padRight(size, 10),
+			size,
 			ageColoured,
 			r.item.Path,
 		)

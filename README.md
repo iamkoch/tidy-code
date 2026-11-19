@@ -2,7 +2,7 @@
 
 A terminal UI for finding and removing build artefacts and dependency caches across local projects.
 
-It walks a directory tree, groups what it finds by language, and shows total disk usage. You deselect anything you want to keep, then delete the rest. Results are cached so reopening is fast; press `r` to rescan.
+It walks a directory tree, groups what it finds by language, and shows total disk usage. You deselect anything you want to keep, then delete the rest. Results are cached so reopening is fast. Press `R` to rescan everything, or `r` to re-measure only the item or group under the cursor.
 
 ## Install
 
@@ -25,6 +25,16 @@ tidy-code ~/projects   # scans the given path
 
 All items start selected. Toggle off the ones you want to keep, then press `d`.
 
+### Item and group rescan
+
+`r` re-measures the item under the cursor, or every item in a group when the cursor is on a group header. It does not walk the rest of the tree, so it returns quickly. Selection, folding, and the cursor position stay as they were. Use it to check the effect of a tool's own clean command, for example:
+
+1. Move the cursor to `~/.yarn`.
+2. Run `yarn cache clean` in another terminal.
+3. Press `r`.
+
+The status line shows the size before and after, such as `rescanned /Users/ant/.yarn: 2.1 GiB -> 140.0 MiB (-1.9 GiB)`. Items whose directory no longer exists are removed from the list and counted as `gone`.
+
 ## Screenshots
 
 The TUI uses ANSI colour, which markdown does not render. The blocks below show layout and structure; in a real terminal the cursor row is highlighted, selected items are green, partially selected groups are amber, and the last-modified column is coloured red, amber, or green by age.
@@ -40,7 +50,7 @@ List view (cursor on the Node.js header, one item under Node.js deselected, Rust
 ```
   tidy   /Users/ant/projects
   selected: 18.3 GiB across 142 items
-  cached 2h ago · press [r] to rescan
+  cached 2h ago · press [R] to rescan all
 
 ▸ [x] ▾ Node.js (87)              12.4 GiB / 14.1 GiB
       [x]   412.3 MiB   2w ago      /Users/ant/projects/web-app/node_modules
@@ -54,7 +64,7 @@ List view (cursor on the Node.js header, one item under Node.js deselected, Rust
   [x] ▸ Python (39)                847.2 MiB / 847.2 MiB
 
   [↑↓/jk] move  [PgUp/PgDn] page  [g/G] top/bot  [Tab/[ ]] next/prev group
-  [c/o or ←/→] fold  [C/O] fold all  [space] toggle  [a/n] all/none  [d] delete  [r] rescan  [q] quit
+  [c/o or ←/→] fold  [C/O] fold all  [space] toggle  [a/n] all/none  [d] delete  [r/R] rescan row/all  [q] quit
 ```
 
 Confirmation:
@@ -77,7 +87,7 @@ After delete, back to the list with a status line:
 
   nothing to clean up.
 
-  [q] quit
+  [R] rescan all  [q] quit
 ```
 
 Glyph key:
